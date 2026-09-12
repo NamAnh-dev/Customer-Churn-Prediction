@@ -66,9 +66,11 @@ def plot_confusion_matrix(y_true, y_pred,title: str = "Confusion Matrix",save_pa
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
-    print(f"\n  Recall  = TP/(TP+FN) = {tp}/{tp+fn} = {tp/(tp+fn):.1%}")
-    print(f"  Precision = TP/(TP+FP) = {tp}/{tp+fp} = {tp/(tp+fp):.1%}")
-    print(f"  Khách churn bị bỏ sót (FN): {fn:,}")
+    recall = tp / (tp + fn) if (tp + fn) > 0 else float("nan")
+    precision = tp / (tp + fp) if (tp + fp) > 0 else float("nan")
+    print(f"\n  Recall    = TP/(TP+FN) = {tp}/{tp+fn} = {recall:.1%}")
+    print(f"  Precision = TP/(TP+FP) = {tp}/{tp+fp} = {precision:.1%}")
+    print(f"  Missed churners (FN): {fn:,}")
 
 
 def plot_roc_pr_curves(models_results: dict,y_true,save_path: str = None,):
@@ -144,7 +146,6 @@ def plot_metrics_comparison(all_metrics: dict,save_path: str = None,):
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
 
-    # In bảng đẹp
     print("\n=== Metrics Summary ===")
     print(metrics_df.round(3).to_string())
 

@@ -1,3 +1,19 @@
+"""SHAP-based model explainability + business ROI estimation.
+
+Key fix vs the original file: every plotting function used to assume its
+own shape for `shap_values` (some expected 2D, some expected 3D
+`(n_samples, n_features, n_classes)`), and those assumptions disagreed with
+each other. SHAP's own API has changed this shape across versions, so the
+two assumptions silently breaking was a matter of *when*, not *if*.
+`_flatten_shap_output()` is now the single place that normalizes whatever
+SHAP returns into one consistent 2D array (rows = samples, cols = features,
+values = contribution to the POSITIVE / churn class). Every function below
+calls it, so there is exactly one place to fix if a future SHAP version
+changes its output format again.
+"""
+
+from __future__ import annotations
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -6,94 +22,99 @@ import logging
 log = logging.getLogger(__name__)
 
 
+def _flatten_shap_output(shap_vals, positive_class: int = 1) -> np.ndarray:
+    """Normalize any SHAP output shape into a 2D (n_samples, n_features) array
+    of contributions toward `positive_class`.
+
+    Handles the three shapes SHAP has used across versions:
+    - list of arrays, one per class: [array(n, f), array(n, f)]
+    - single 3D array: (n_samples, n_features, n_classes)
+    - already 2D: (n_samples, n_features)  (e.g. KernelExplainer on predict_proba
+      for a single class, or newer SHAP already returning the positive class only)
+    """
+    if isinstance(shap_vals, list):
+        return np.asarray(shap_vals[positive_class])
+    shap_vals = np.asarray(shap_vals)
+    if shap_vals.ndim == 3:
+        return shap_vals[:, :, positive_class]
+    return shap_vals
+
+
 def compute_shap_values(model, X: pd.DataFrame, sample_size: int = 500):
+    """Compute SHAP values for a fitted, already-encoded numeric feature matrix.
+
+    `model` must be the raw estimator (e.g. `pipeline.named_steps["model"]`),
+    not the full pipeline — SHAP explainers need direct access to the model's
+    `predict`/`predict_proba` and, for tree models, its internal structure.
+    `X` must already be through preprocessing (i.e. the pipeline's `preprocess`
+    step output), matching exactly what the model was trained on.
+    """
     try:
         import shap
-    except ImportError:
-        raise ImportError("Chưa cài shap. Chạy: pip install shap")
+    except ImportError as e:
+        raise ImportError("shap is not installed. Run: pip install shap") from e
 
-    if len(X) > sample_size:
-        X_sample = X.sample(sample_size, random_state=42)
-    else:
-        X_sample = X.copy()
-
-    log.info(f"Computing SHAP values for {len(X_sample)} samples...")
+    X_sample = X.sample(sample_size, random_state=42) if len(X) > sample_size else X.copy()
+    log.info("Computing SHAP values for %d samples...", len(X_sample))
 
     if hasattr(model, "feature_importances_"):
         explainer = shap.TreeExplainer(model)
-        shap_vals = explainer.shap_values(X_sample)
-
-        if isinstance(shap_vals, list):
-            shap_vals = shap_vals[1]
+        raw_shap = explainer.shap_values(X_sample)
     else:
         background = shap.kmeans(X_sample, 10)
         explainer = shap.KernelExplainer(model.predict_proba, background)
-        shap_vals = explainer.shap_values(X_sample)
-        if isinstance(shap_vals, list):
-            shap_vals = shap_vals[1]
+        raw_shap = explainer.shap_values(X_sample)
 
-    log.info(f"SHAP values computed: shape={shap_vals.shape}")
-    return shap_vals, explainer, X_sample
+    shap_values = _flatten_shap_output(raw_shap)
+    log.info("SHAP values computed: shape=%s", shap_values.shape)
+    return shap_values, explainer, X_sample
 
 
-# ── Plot 1: Summary plot ──────────────────────────────────────
-def plot_shap_summary(shap_values: np.ndarray,X_sample: pd.DataFrame,save_path: str = None,max_display: int = 15):
+def plot_shap_summary(shap_values: np.ndarray, X_sample: pd.DataFrame, save_path: str = None, max_display: int = 15):
     try:
         import shap
-    except ImportError:
-        raise ImportError("pip install shap")
+    except ImportError as e:
+        raise ImportError("shap is not installed. Run: pip install shap") from e
 
-    shap.summary_plot(
-        shap_values, X_sample,
-        max_display=max_display,
-        show=False,
-        plot_size=None,
-    )
-    plt.title("SHAP Summary Plot — Feature Impact on Churn Probability",fontsize=12, fontweight="bold", pad=15)
+    shap.summary_plot(shap_values, X_sample, max_display=max_display, show=False, plot_size=None)
+    plt.title("SHAP Summary Plot — Feature Impact on Churn Probability", fontsize=12, fontweight="bold", pad=15)
     plt.tight_layout()
-    plt.legend()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     plt.show()
-    log.info("Saved SHAP summary plot")
 
 
-# ── Plot 2: Bar plot (mean |SHAP|) ───────────────────────────────────────
-def plot_shap_importance(shap_values: np.ndarray,X_sample: pd.DataFrame,save_path: str = None,top_n: int = 15):
-    mean_abs_shap = np.abs(shap_values).mean(axis=(0, 2))
-    # mean_abs_shap = np.abs(shap_values).mean(axis=0)
+def plot_shap_importance(shap_values: np.ndarray, X_sample: pd.DataFrame, save_path: str = None, top_n: int = 15):
+    mean_abs_shap = np.abs(shap_values).mean(axis=0)  # 2D input guaranteed -> average over samples only
     importance_df = pd.DataFrame({
-        "feature":    X_sample.columns,
+        "feature": X_sample.columns,
         "importance": mean_abs_shap,
     }).sort_values("importance").tail(top_n)
 
-    def get_color(feat):
+    def get_color(feat: str) -> str:
         account_feats = ["Contract", "tenure", "MonthlyCharges", "TotalCharges",
-                         "PaperlessBilling", "PaymentMethod", "charge_ratio",
-                         "avg_monthly_charge", "num_services"]
+                          "PaperlessBilling", "PaymentMethod", "charge_ratio",
+                          "avg_monthly_charge", "num_services"]
         service_feats = ["InternetService", "OnlineSecurity", "TechSupport",
-                         "StreamingTV", "StreamingMovies", "OnlineBackup",
-                         "DeviceProtection", "MultipleLines", "PhoneService"]
-        for a in account_feats:
-            if a.lower() in feat.lower():
-                return "#378ADD"
-        for s in service_feats:
-            if s.lower() in feat.lower():
-                return "#1D9E75"
+                          "StreamingTV", "StreamingMovies", "OnlineBackup",
+                          "DeviceProtection", "MultipleLines", "PhoneService"]
+        if any(a.lower() in feat.lower() for a in account_feats):
+            return "#378ADD"
+        if any(s.lower() in feat.lower() for s in service_feats):
+            return "#1D9E75"
         return "#7F77DD"
 
     colors = [get_color(f) for f in importance_df["feature"]]
 
     fig, ax = plt.subplots(figsize=(9, 6))
-    bars = ax.barh(importance_df["feature"], importance_df["importance"],
-                   color=colors, height=0.65)
-    ax.set_title("SHAP Feature Importance\nmean(|SHAP value|) — contribution trung bình",
+    bars = ax.barh(importance_df["feature"], importance_df["importance"], color=colors, height=0.65)
+    ax.set_title("SHAP Feature Importance\nmean(|SHAP value|) across sampled customers",
                  fontsize=12, fontweight="bold")
     ax.set_xlabel("Mean |SHAP Value|")
     ax.spines[["top", "right"]].set_visible(False)
 
     for bar in bars:
-        ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height()/2,
+        ax.text(bar.get_width() + 0.001, bar.get_y() + bar.get_height() / 2,
                 f"{bar.get_width():.3f}", va="center", fontsize=9)
 
     from matplotlib.patches import Patch
@@ -109,23 +130,21 @@ def plot_shap_importance(shap_values: np.ndarray,X_sample: pd.DataFrame,save_pat
     plt.show()
 
 
-# ── Plot 3: Dependence plot ───────────────────────────────────────────────
-def plot_shap_dependence(shap_values: np.ndarray,X_sample: pd.DataFrame,feature: str,interaction_feature: str = None,save_path: str = None,):
-    
+def plot_shap_dependence(shap_values: np.ndarray, X_sample: pd.DataFrame, feature: str,
+                          interaction_feature: str = None, save_path: str = None):
     if feature not in X_sample.columns:
-        log.warning(f"Feature '{feature}' not found in X_sample")
+        log.warning("Feature '%s' not found in X_sample", feature)
         return
 
     fig, ax = plt.subplots(figsize=(9, 5))
     feature_idx = list(X_sample.columns).index(feature)
 
     x_vals = X_sample[feature].values
-    y_vals = shap_values[:, feature_idx, :].mean(axis=1)
+    y_vals = shap_values[:, feature_idx]  # 2D input guaranteed, no extra axis to average over
 
     if interaction_feature and interaction_feature in X_sample.columns:
         interact_vals = X_sample[interaction_feature].values
-        scatter = ax.scatter(x_vals, y_vals, c=interact_vals,
-                             cmap="RdYlGn_r", alpha=0.5, s=15)
+        scatter = ax.scatter(x_vals, y_vals, c=interact_vals, cmap="RdYlGn_r", alpha=0.5, s=15)
         plt.colorbar(scatter, ax=ax, label=interaction_feature)
     else:
         ax.scatter(x_vals, y_vals, color="#378ADD", alpha=0.4, s=15)
@@ -133,8 +152,7 @@ def plot_shap_dependence(shap_values: np.ndarray,X_sample: pd.DataFrame,feature:
     ax.axhline(0, color="gray", linestyle="--", linewidth=1)
     ax.set_xlabel(feature)
     ax.set_ylabel(f"SHAP value ({feature})")
-    ax.set_title(f"SHAP Dependence: {feature}\n"
-                 f"Dương = tăng churn probability, Âm = giảm",
+    ax.set_title(f"SHAP Dependence: {feature}\nPositive = increases churn probability, negative = decreases it",
                  fontsize=12, fontweight="bold")
     ax.spines[["top", "right"]].set_visible(False)
 
@@ -144,28 +162,21 @@ def plot_shap_dependence(shap_values: np.ndarray,X_sample: pd.DataFrame,feature:
     plt.show()
 
 
-# ── Plot 4: Waterfall plot — test customer  ────────────────
-def plot_shap_waterfall_single(explainer,X_sample: pd.DataFrame,customer_idx: int = 0,save_path: str = None,):
+def plot_shap_waterfall_single(explainer, X_sample: pd.DataFrame, customer_idx: int = 0, save_path: str = None):
+    """Explain a single customer's prediction as a waterfall of feature contributions."""
     customer = X_sample.iloc[[customer_idx]]
 
-    # Tính SHAP values cho customer
-    shap_vals_single = explainer.shap_values(customer)
-    if isinstance(shap_vals_single, list):
-        shap_vals_single = shap_vals_single[1]
+    raw_shap_single = explainer.shap_values(customer)
+    shap_single = _flatten_shap_output(raw_shap_single)[0]  # -> 1D array, one value per feature
 
     expected_value = explainer.expected_value
-
     if isinstance(expected_value, (list, np.ndarray)):
-        expected_value = np.array(expected_value).mean()
-
+        expected_value = np.asarray(expected_value)[1] if len(np.asarray(expected_value)) > 1 else float(np.asarray(expected_value).mean())
     expected_value = float(expected_value)
 
-    # Manual waterfall plot (compatible với tất cả phiên bản shap)
-    shap_single = shap_vals_single[0].mean(axis=1)
     feature_names = list(X_sample.columns)
     feature_values = customer.values[0]
 
-    # Sort theo |SHAP|, lấy top 10
     top_idx = np.argsort(np.abs(shap_single))[-10:][::-1]
     top_shap = shap_single[top_idx]
     top_names = [f"{feature_names[i]}={feature_values[i]:.2g}" for i in top_idx]
@@ -180,11 +191,12 @@ def plot_shap_waterfall_single(explainer,X_sample: pd.DataFrame,customer_idx: in
     ax.axvline(0, color="black", linewidth=1)
     ax.set_xlabel("SHAP Value (impact on churn probability)")
 
-    prob = explainer.predict(customer) if hasattr(explainer, "predict") else None
-    title = f"SHAP Waterfall — Customer #{customer_idx}\n"
-    title += f"Baseline: {expected_value:.2f} | "
-    title += f"Predicted churn prob: {expected_value + shap_single.sum():.2f}"
-    ax.set_title(title, fontsize=11, fontweight="bold")
+    predicted_prob = expected_value + shap_single.sum()
+    ax.set_title(
+        f"SHAP Waterfall — Customer #{customer_idx}\n"
+        f"Baseline: {expected_value:.2f} | Predicted churn prob: {predicted_prob:.2f}",
+        fontsize=11, fontweight="bold",
+    )
     ax.spines[["top", "right"]].set_visible(False)
 
     plt.tight_layout()
@@ -193,7 +205,6 @@ def plot_shap_waterfall_single(explainer,X_sample: pd.DataFrame,customer_idx: in
     plt.show()
 
 
-# ── ROI Calculator ────────────────────────────────────────────────────────
 def compute_roi_table(
     y_true: pd.Series,
     y_prob: np.ndarray,
@@ -203,31 +214,41 @@ def compute_roi_table(
     retention_cost: float = 50.0,
     retention_success_rate: float = 0.30,
 ) -> pd.DataFrame:
-  
-    y_pred = (y_prob >= threshold).astype(int)
+    """Translate confusion-matrix outcomes into an estimated dollar impact.
 
+    All dollar assumptions (avg_monthly_revenue, retention_cost,
+    retention_success_rate, avg_tenure_lost) are illustrative placeholders,
+    not values derived from this dataset (the Telco data has no retention
+    campaign cost/success history to estimate them from). State that
+    explicitly wherever this table is presented — the *mechanism* (how a
+    threshold choice translates to dollars) is the deliverable, not these
+    specific numbers. Swap in real figures from Finance/Marketing before
+    using this to argue for a specific threshold in production.
+
+    IMPORTANT: pass the threshold you actually intend to deploy (the one
+    tuned on the validation set), not the default 0.5, so this table tells
+    a consistent story with the rest of the analysis.
+    """
     from sklearn.metrics import confusion_matrix
+
+    y_pred = (y_prob >= threshold).astype(int)
     tn, fp, fn, tp = confusion_matrix(y_true, y_pred).ravel()
 
     revenue_saved_per_customer = avg_monthly_revenue * avg_tenure_lost
-    cost_per_tp = retention_cost
     revenue_per_tp = revenue_saved_per_customer * retention_success_rate
 
+    model_cost = (tp + fp) * retention_cost
+    model_saved = tp * revenue_per_tp
+    model_net = model_saved - model_cost
     no_model_loss = (tp + fn) * revenue_saved_per_customer
 
-    model_cost   = (tp + fp) * retention_cost
-    model_saved  = tp * revenue_per_tp
-    model_net    = model_saved - model_cost
-
     rows = [
-        ("Customers đúng phát hiện churn (TP)",    tp,    f"+${tp * revenue_per_tp:,.0f}"),
-        ("Customers báo nhầm (FP) — retention cost", fp,  f"-${fp * retention_cost:,.0f}"),
-        ("Customers bỏ sót (FN) — revenue lost",    fn,  f"-${fn * revenue_saved_per_customer:,.0f}"),
-        ("Tổng chi phí retention",                  tp+fp, f"-${model_cost:,.0f}"),
-        ("Tổng revenue saved",                      "-",   f"+${model_saved:,.0f}"),
-        ("Net benefit so với không dùng model",     "-",   f"+${model_net:,.0f}"),
-        ("Revenue lost nếu không có model",         tp+fn, f"-${no_model_loss:,.0f}"),
+        ("Correctly caught churners (TP)", tp, f"+${tp * revenue_per_tp:,.0f}"),
+        ("False alarms (FP) — retention cost spent", fp, f"-${fp * retention_cost:,.0f}"),
+        ("Missed churners (FN) — revenue lost", fn, f"-${fn * revenue_saved_per_customer:,.0f}"),
+        ("Total retention spend", tp + fp, f"-${model_cost:,.0f}"),
+        ("Total revenue saved", "-", f"+${model_saved:,.0f}"),
+        ("Net benefit vs. no model", "-", f"${model_net:,.0f}"),
+        ("Revenue lost with no model at all", tp + fn, f"-${no_model_loss:,.0f}"),
     ]
-
-    df = pd.DataFrame(rows, columns=["Item", "Count", "Amount"])
-    return df, model_net
+    return pd.DataFrame(rows, columns=["Item", "Count", "Amount"])

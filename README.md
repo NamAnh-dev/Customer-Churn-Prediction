@@ -62,18 +62,6 @@
 
 ![SHAP Importance](images/shap_importance.png)
 
-### ROI Sensitivity Analysis
-
-![ROI](images/roi_sensitivity.png)
-
-### Executive Dashboard
-
-![Dashboard](images/executive_dashboard.png)
-
----
-
----
-
 ## Cấu trúc project
 
 ```
