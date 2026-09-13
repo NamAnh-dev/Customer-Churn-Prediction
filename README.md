@@ -2,17 +2,8 @@
 
 ### Imbalanced Classification · SHAP Explainability · Business ROI
 
-> Dự đoán khách hàng có khả năng rời bỏ dịch vụ Telco,
-> giải thích tại sao bằng SHAP, và tính ROI của chương trình retention.
-
----
-
-## Điểm nổi bật
-
-- **Xử lý imbalanced data đúng cách** — so sánh SMOTE, class_weight, under-sampling
-- **SHAP Explainability** — không chỉ predict mà còn giải thích được tại sao
-- **ROI Calculator** — translate model output thành business value ($)
-- **Threshold optimization** — không dùng 0.5 mặc định, tìm threshold tối ưu cho F1
+> Dự đoán khách hàng có khả năng rời bỏ dịch vụ Telco, giải thích tại sao bằng SHAP,
+> và tính ROI của chương trình retention.
 
 ---
 
@@ -24,19 +15,56 @@
 | ------------ | ---------------------------------- |
 | Customers    | 7,043                              |
 | Features     | 20                                 |
-| Churn rate   | ~26%                               |
+| Churn rate   | 26.5%                              |
 | Problem type | Binary classification (imbalanced) |
+
+Churn rate theo loại hợp đồng — khách **Month-to-month** rời bỏ nhiều nhất, gấp ~15 lần khách **Two year**:
+
+| Contract       | Churn Rate | Customers |
+| -------------- | ---------: | --------: |
+| Month-to-month |      42.7% |     3,875 |
+| One year       |      11.3% |     1,473 |
+| Two year       |       2.8% |     1,695 |
 
 ---
 
 ## Results
 
-| Model                          | Precision | Recall |    F1 | AUC-ROC | PR-AUC |
-| ------------------------------ | --------: | -----: | ----: | ------: | ------ |
-| Logistic Regression            |     0.506 |  0.797 | 0.619 |   0.848 | 0.671  |
-| Random Forest                  |     0.558 |  0.709 | 0.624 |   0.841 | 0.646  |
-| **Gradient Boosting** _(best)_ |     0.646 |  0.532 | 0.584 |   0.838 | 0.646  |
-| XGBoost                        |     0.521 |  0.789 | 0.628 |   0.841 | 0.651  |
+| Model                   | Precision |    Recall |    F1 | AUC-ROC | PR-AUC |
+| ----------------------- | --------: | --------: | ----: | ------: | -----: |
+| **Logistic Regression** |     0.512 | **0.829** | 0.633 |   0.862 |  0.690 |
+| Random Forest           |     0.577 |     0.698 | 0.632 |   0.854 |  0.661 |
+| Gradient Boosting       |     0.680 |     0.540 | 0.602 |   0.854 |  0.673 |
+| XGBoost                 |     0.520 |     0.794 | 0.629 |   0.852 |  0.671 |
+
+**Model được chọn: Logistic Regression** (Recall cao nhất — ưu tiên bắt được càng nhiều khách sắp rời bỏ
+càng tốt, chấp nhận đánh đổi precision thấp hơn, vì bỏ sót một khách rời bỏ tốn kém hơn nhiều so với một
+lần gửi nhầm ưu đãi retention).
+
+**Trên tập test**, threshold tối ưu tìm được là **0.59** (thay vì mặc định 0.50):
+
+| Threshold       | Precision | Recall |    F1 | AUC-ROC |
+| --------------- | --------: | -----: | ----: | ------: |
+| 0.50 (mặc định) |     0.506 |  0.802 | 0.620 |   0.839 |
+| 0.59 (tối ưu)   |     0.546 |  0.733 | 0.626 |   0.839 |
+
+Threshold cao hơn giúp giảm số lượng false alarm (khách bị gắn nhầm là sắp rời bỏ), đổi lại nhận diện được
+ít hơn một chút — đây chính là trade-off được thể hiện trong `images/threshold_analysis.png`.
+
+### Business ROI (test set, threshold = 0.59)
+
+| Item                                     | Count |       Amount |
+| ---------------------------------------- | ----: | -----------: |
+| Correctly caught churners (TP)           |   274 |     +$64,116 |
+| False alarms (FP) — retention cost spent |   228 |     -$11,400 |
+| Missed churners (FN) — revenue lost      |   100 |     -$78,000 |
+| Total retention spend                    |   502 |     -$25,100 |
+| Total revenue saved                      |     — |     +$64,116 |
+| **Net benefit vs. no model**             |     — | **+$39,016** |
+| Revenue lost with no model at all        |   374 |    -$291,720 |
+
+_(Giả định: avg monthly revenue $65, avg tenure lost 12 tháng, retention cost $50/khách,_
+_retention offer thành công 30% — chỉnh trong `compute_roi_table()` nếu bạn có số thực tế khác.)_
 
 ---
 
@@ -58,9 +86,15 @@
 
 ![Threshold](images/threshold_analysis.png)
 
-### SHAP Feature Importance
+### Confusion Matrix (test set, tuned threshold)
 
-![SHAP Importance](images/shap_importance.png)
+![Confusion Matrix](images/confusion_matrix.png)
+
+### Feature Importance
+
+![Feature Importance](images/shap_importance.png)
+
+---
 
 ## Cấu trúc project
 
@@ -71,21 +105,23 @@ churn-prediction/
 ├── requirements.txt
 │
 ├── notebooks/
-│   ├── 00_EDA.py/.ipynb
-│   ├── 01_modeling.py/.ipynb
-│   ├── 02_shap.py/.ipynb
-│   └── 03_business_recommendation.py/.ipynb
+│   ├── 00_EDA.ipynb
+│   ├── 01_modeling.ipynb
+│   ├── 02_shap.ipynb
+│   └── 03_business_recommendation.ipynb
 │
 ├── src/
+│   ├── __init__.py
 │   ├── data_loader.py
-│   ├── preprocessor.py
+│   ├── preprocessing.py
+│   ├── split_and_imbalance.py
 │   ├── evaluate.py
 │   └── shap_analysis.py
 │
 ├── data/
 │   ├── Telco-Customer-Churn.csv
 │   ├── best_model.pkl
-│   └── feature_columns.pkl
+│   └── model_meta.json        # tên model + threshold tối ưu, sinh ra bởi 01_modeling
 │
 └── images/
 ```
@@ -103,7 +139,7 @@ python -m venv venv
 venv\Scripts\activate
 pip install -r requirements.txt
 
-# Chạy theo thứ tự
+# Chạy theo thứ tự — mỗi notebook phụ thuộc output của notebook trước
 jupyter notebook
 # → 00_EDA → 01_modeling → 02_shap → 03_business_recommendation
 ```
