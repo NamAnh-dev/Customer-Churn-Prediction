@@ -24,7 +24,7 @@ NUMERIC_COLS = [
 
 class ChurnFeatureEngineer(BaseEstimator, TransformerMixin):
     def fit(self, X: pd.DataFrame, y=None) -> "ChurnFeatureEngineer":
-        return self  # stateless: nothing to learn from the training data
+        return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
         X = X.copy()

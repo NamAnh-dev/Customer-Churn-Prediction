@@ -1,19 +1,4 @@
-"""SHAP-based model explainability + business ROI estimation.
-
-Key fix vs the original file: every plotting function used to assume its
-own shape for `shap_values` (some expected 2D, some expected 3D
-`(n_samples, n_features, n_classes)`), and those assumptions disagreed with
-each other. SHAP's own API has changed this shape across versions, so the
-two assumptions silently breaking was a matter of *when*, not *if*.
-`_flatten_shap_output()` is now the single place that normalizes whatever
-SHAP returns into one consistent 2D array (rows = samples, cols = features,
-values = contribution to the POSITIVE / churn class). Every function below
-calls it, so there is exactly one place to fix if a future SHAP version
-changes its output format again.
-"""
-
 from __future__ import annotations
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -23,15 +8,6 @@ log = logging.getLogger(__name__)
 
 
 def _flatten_shap_output(shap_vals, positive_class: int = 1) -> np.ndarray:
-    """Normalize any SHAP output shape into a 2D (n_samples, n_features) array
-    of contributions toward `positive_class`.
-
-    Handles the three shapes SHAP has used across versions:
-    - list of arrays, one per class: [array(n, f), array(n, f)]
-    - single 3D array: (n_samples, n_features, n_classes)
-    - already 2D: (n_samples, n_features)  (e.g. KernelExplainer on predict_proba
-      for a single class, or newer SHAP already returning the positive class only)
-    """
     if isinstance(shap_vals, list):
         return np.asarray(shap_vals[positive_class])
     shap_vals = np.asarray(shap_vals)
@@ -41,14 +17,6 @@ def _flatten_shap_output(shap_vals, positive_class: int = 1) -> np.ndarray:
 
 
 def compute_shap_values(model, X: pd.DataFrame, sample_size: int = 500):
-    """Compute SHAP values for a fitted, already-encoded numeric feature matrix.
-
-    `model` must be the raw estimator (e.g. `pipeline.named_steps["model"]`),
-    not the full pipeline — SHAP explainers need direct access to the model's
-    `predict`/`predict_proba` and, for tree models, its internal structure.
-    `X` must already be through preprocessing (i.e. the pipeline's `preprocess`
-    step output), matching exactly what the model was trained on.
-    """
     try:
         import shap
     except ImportError as e:
@@ -85,7 +53,7 @@ def plot_shap_summary(shap_values: np.ndarray, X_sample: pd.DataFrame, save_path
 
 
 def plot_shap_importance(shap_values: np.ndarray, X_sample: pd.DataFrame, save_path: str = None, top_n: int = 15):
-    mean_abs_shap = np.abs(shap_values).mean(axis=0)  # 2D input guaranteed -> average over samples only
+    mean_abs_shap = np.abs(shap_values).mean(axis=0)
     importance_df = pd.DataFrame({
         "feature": X_sample.columns,
         "importance": mean_abs_shap,
@@ -140,8 +108,7 @@ def plot_shap_dependence(shap_values: np.ndarray, X_sample: pd.DataFrame, featur
     feature_idx = list(X_sample.columns).index(feature)
 
     x_vals = X_sample[feature].values
-    y_vals = shap_values[:, feature_idx]  # 2D input guaranteed, no extra axis to average over
-
+    y_vals = shap_values[:, feature_idx]
     if interaction_feature and interaction_feature in X_sample.columns:
         interact_vals = X_sample[interaction_feature].values
         scatter = ax.scatter(x_vals, y_vals, c=interact_vals, cmap="RdYlGn_r", alpha=0.5, s=15)
@@ -163,7 +130,6 @@ def plot_shap_dependence(shap_values: np.ndarray, X_sample: pd.DataFrame, featur
 
 
 def plot_shap_waterfall_single(explainer, X_sample: pd.DataFrame, customer_idx: int = 0, save_path: str = None):
-    """Explain a single customer's prediction as a waterfall of feature contributions."""
     customer = X_sample.iloc[[customer_idx]]
 
     raw_shap_single = explainer.shap_values(customer)
@@ -214,21 +180,6 @@ def compute_roi_table(
     retention_cost: float = 50.0,
     retention_success_rate: float = 0.30,
 ) -> pd.DataFrame:
-    """Translate confusion-matrix outcomes into an estimated dollar impact.
-
-    All dollar assumptions (avg_monthly_revenue, retention_cost,
-    retention_success_rate, avg_tenure_lost) are illustrative placeholders,
-    not values derived from this dataset (the Telco data has no retention
-    campaign cost/success history to estimate them from). State that
-    explicitly wherever this table is presented — the *mechanism* (how a
-    threshold choice translates to dollars) is the deliverable, not these
-    specific numbers. Swap in real figures from Finance/Marketing before
-    using this to argue for a specific threshold in production.
-
-    IMPORTANT: pass the threshold you actually intend to deploy (the one
-    tuned on the validation set), not the default 0.5, so this table tells
-    a consistent story with the rest of the analysis.
-    """
     from sklearn.metrics import confusion_matrix
 
     y_pred = (y_prob >= threshold).astype(int)
